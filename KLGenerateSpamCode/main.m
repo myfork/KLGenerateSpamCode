@@ -102,6 +102,8 @@ BOOL regularReplacement(NSMutableString *originalString, NSString *regularExpres
     return isChanged;
 }
 
+
+
 void renameFile(NSString *oldPath, NSString *newPath) {
     NSError *error;
     [[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&error];
@@ -686,7 +688,7 @@ void handleXcassetsFiles(NSString *directory) {
 
 #pragma mark - 删除注释
 
-void deleteComments(NSString *directory, NSArray<NSString *> *ignoreDirNames) {
+void deleteComments_old(NSString *directory, NSArray<NSString *> *ignoreDirNames) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:directory error:nil];
     BOOL isDirectory;
@@ -704,6 +706,157 @@ void deleteComments(NSString *directory, NSArray<NSString *> *ignoreDirNames) {
         regularReplacement(fileContent, @"/\\*{1,2}[\\s\\S]*?\\*/", @"");
         regularReplacement(fileContent, @"^\\s*\\n",                @"");
         [fileContent writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+
+
+// 正则替换函数，增加了 NSRange 参数
+BOOL regularReplacement_new(NSMutableString *originalString, NSString *regularExpression, NSString *newString, NSRange searchRange) {
+    __block BOOL isChanged = NO;
+    BOOL isGroupNo1 = [newString isEqualToString:@"\\1"];
+    
+    // 注意：这里的 options 需要包含 NSRegularExpressionAnchorsMatchLines 才能让 `^` 匹配每行的开头
+    NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:regularExpression options:NSRegularExpressionAnchorsMatchLines|NSRegularExpressionUseUnixLineSeparators error:nil];
+    
+    // 在指定的 searchRange 内查找匹配项
+    NSArray<NSTextCheckingResult *> *matches = [expression matchesInString:originalString options:0 range:searchRange];
+    
+    [matches enumerateObjectsWithOptions:NSEnumerationReverse usingBlock:^(NSTextCheckingResult * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        if (!isChanged) {
+            isChanged = YES;
+        }
+        if (isGroupNo1) {
+            NSString *withString = [originalString substringWithRange:[obj rangeAtIndex:1]];
+            [originalString replaceCharactersInRange:obj.range withString:withString];
+        } else {
+            [originalString replaceCharactersInRange:obj.range withString:newString];
+        }
+    }];
+    
+    return isChanged;
+}
+
+// 主函数，用于遍历文件并删除注释
+void deleteComments_2(NSString *directory, NSArray<NSString *> *ignoreDirNames) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:directory error:nil];
+    BOOL isDirectory;
+    for (NSString *fileName in files) {
+        if ([ignoreDirNames containsObject:fileName]) continue;
+        NSString *filePath = [directory stringByAppendingPathComponent:fileName];
+        
+        // 增加日志打印，方便调试
+        NSLog(@"正在处理文件：%@", filePath);
+        
+        if ([fm fileExistsAtPath:filePath isDirectory:&isDirectory] && isDirectory) {
+            deleteComments(filePath, ignoreDirNames);
+            continue;
+        }
+        if (![fileName hasSuffix:@".h"] && ![fileName hasSuffix:@".m"] && ![fileName hasSuffix:@".mm"] && ![fileName hasSuffix:@".swift"]) continue;
+
+        NSString *originalFileContent = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
+        if (!originalFileContent || originalFileContent.length == 0) continue;
+
+        // 1. 找到第7行的起始位置
+        NSUInteger startOffset = 0;
+        for (int i = 0; i < 6; i++) {
+            NSRange newlineRange = [originalFileContent rangeOfString:@"\n"
+                                                              options:0
+                                                                range:NSMakeRange(startOffset, originalFileContent.length - startOffset)];
+            if (newlineRange.location == NSNotFound) {
+                startOffset = originalFileContent.length;
+                break;
+            }
+            startOffset = newlineRange.location + newlineRange.length;
+        }
+
+        if (startOffset >= originalFileContent.length) {
+            continue;
+        }
+
+        // 2. 将文件分割成“头部”和“身体”
+        NSString *header = [originalFileContent substringToIndex:startOffset];
+        NSMutableString *body = [[originalFileContent substringFromIndex:startOffset] mutableCopy];
+
+        // 3. 只对“身体”部分进行修改
+        BOOL bodyChanged = NO;
+        
+        // ✅✅✅ --- 最终修正 --- ✅✅✅
+        // 核心改动：不再复用旧的 bodyRange，而是在每次调用时都重新计算并传入当前的最新范围。
+        bodyChanged |= regularReplacement_new(body, @"([^:/])//.*",          @"\\1", NSMakeRange(0, body.length));
+        bodyChanged |= regularReplacement_new(body, @"^//.*",                @"",   NSMakeRange(0, body.length));
+        bodyChanged |= regularReplacement_new(body, @"/\\*{1,2}[\\s\\S]*?\\*/", @"",   NSMakeRange(0, body.length));
+        bodyChanged |= regularReplacement_new(body, @"^\\s*\\n",             @"",   NSMakeRange(0, body.length));
+        
+        // 4. 如果“身体”被修改过，则将“头部”和修改后的“身体”拼接并写回文件
+        if (bodyChanged) {
+            NSString *finalContent = [header stringByAppendingString:body];
+            [finalContent writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+}
+
+
+// 唯一的最终函数
+void deleteComments(NSString *directory, NSArray<NSString *> *ignoreDirNames) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:directory error:nil];
+    BOOL isDirectory;
+
+    for (NSString *fileName in files) {
+        if ([ignoreDirNames containsObject:fileName]) continue;
+        NSString *filePath = [directory stringByAppendingPathComponent:fileName];
+
+        if ([fm fileExistsAtPath:filePath isDirectory:&isDirectory] && isDirectory) {
+            deleteComments(filePath, ignoreDirNames);
+            continue;
+        }
+        if (![fileName hasSuffix:@".h"] && ![fileName hasSuffix:@".m"] && ![fileName hasSuffix:@".mm"] && ![fileName hasSuffix:@".swift"]) continue;
+
+        NSString *originalFileContent = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
+        if (!originalFileContent || originalFileContent.length == 0) continue;
+
+        // 1. 找到第7行的起始位置
+        NSUInteger startOffset = 0;
+        for (int i = 0; i < 6; i++) {
+            NSRange newlineRange = [originalFileContent rangeOfString:@"\n"
+                                                              options:0
+                                                                range:NSMakeRange(startOffset, originalFileContent.length - startOffset)];
+            if (newlineRange.location == NSNotFound) {
+                startOffset = originalFileContent.length;
+                break;
+            }
+            startOffset = newlineRange.location + newlineRange.length;
+        }
+
+        if (startOffset >= originalFileContent.length) {
+            continue;
+        }
+
+        // 2. 将文件分割成“头部”和“待处理的身体”
+        NSString *header = [originalFileContent substringToIndex:startOffset];
+        NSString *body = [originalFileContent substringFromIndex:startOffset];
+
+        // 3. ✅ 采用最安全的“一步一替换，生成新字符串”策略 ✅
+        
+        // 创建正则表达式，只创建一次
+        NSRegularExpression *regex1 = [NSRegularExpression regularExpressionWithPattern:@"([^:/])//.*" options:NSRegularExpressionAnchorsMatchLines error:nil];
+        NSRegularExpression *regex2 = [NSRegularExpression regularExpressionWithPattern:@"^//.*" options:NSRegularExpressionAnchorsMatchLines error:nil];
+        NSRegularExpression *regex3 = [NSRegularExpression regularExpressionWithPattern:@"/\\*{1,2}[\\s\\S]*?\\*/" options:0 error:nil];
+        NSRegularExpression *regex4 = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\n" options:NSRegularExpressionAnchorsMatchLines error:nil];
+
+        // 每次替换都对前一次的结果进行操作，生成一个全新的字符串
+        NSString *bodyAfterPass1 = [regex1 stringByReplacingMatchesInString:body options:0 range:NSMakeRange(0, body.length) withTemplate:@"$1"];
+        NSString *bodyAfterPass2 = [regex2 stringByReplacingMatchesInString:bodyAfterPass1 options:0 range:NSMakeRange(0, bodyAfterPass1.length) withTemplate:@""];
+        NSString *bodyAfterPass3 = [regex3 stringByReplacingMatchesInString:bodyAfterPass2 options:0 range:NSMakeRange(0, bodyAfterPass2.length) withTemplate:@""];
+        NSString *finalBody = [regex4 stringByReplacingMatchesInString:bodyAfterPass3 options:0 range:NSMakeRange(0, bodyAfterPass3.length) withTemplate:@""];
+
+        // 4. 如果内容发生了变化，则拼接并写回文件
+        if (![finalBody isEqualToString:body]) {
+            NSString *finalContent = [header stringByAppendingString:finalBody];
+            [finalContent writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
     }
 }
 
